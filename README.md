@@ -11,7 +11,7 @@
 ### Создание нового проекта
 
 ```bash
-composer create-project sedalit/php-framework-skeleton my-app
+composer create-project sedalit/simple-php-framework-skeleton my-app
 cd my-app
 ```
 
