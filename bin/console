@@ -1,0 +1,600 @@
+#!/usr/bin/env php
+<?php
+
+/**
+ * PHP Framework CLI Tool
+ *
+ * Commands:
+ * - make:controller <name>          Create a new controller
+ * - make:model <name>               Create a new model
+ * - make:middleware <name>          Create a new middleware
+ * - make:rule <name>                Create a new validation rule
+ * - make:migration <name>           Create a new migration file
+ * - app:setup                       Setup application structure
+ * - cache:clear                     Clear application cache
+ * - migrate                         Run pending migrations
+ * - migrate:rollback                Rollback the last batch of migrations
+ * - migrate:reset                   Rollback all migrations
+ * - migrate:status                  Show the status of each migration
+ */
+
+$autoloadFiles = [
+    __DIR__ . '/../../../autoload.php',
+    __DIR__ . '/../vendor/autoload.php',
+];
+
+$autoloadFound = false;
+foreach ($autoloadFiles as $file) {
+    if (file_exists($file)) {
+        require $file;
+        $autoloadFound = true;
+        break;
+    }
+}
+
+if (!$autoloadFound) {
+    fwrite(STDERR, 'Autoload file not found. Run: composer install' . PHP_EOL);
+    exit(1);
+}
+
+class Colors {
+    const RESET  = "\033[0m";
+    const GREEN  = "\033[32m";
+    const YELLOW = "\033[33m";
+    const RED    = "\033[31m";
+    const BLUE   = "\033[34m";
+    const CYAN   = "\033[36m";
+    const GRAY   = "\033[90m";
+
+    public static function green($text)  { return self::GREEN  . $text . self::RESET; }
+    public static function yellow($text) { return self::YELLOW . $text . self::RESET; }
+    public static function red($text)    { return self::RED    . $text . self::RESET; }
+    public static function blue($text)   { return self::BLUE   . $text . self::RESET; }
+    public static function cyan($text)   { return self::CYAN   . $text . self::RESET; }
+    public static function gray($text)   { return self::GRAY   . $text . self::RESET; }
+}
+
+class FrameworkCLI {
+    protected array $commands = [];
+
+    public function __construct()
+    {
+        $this->registerCommands();
+    }
+
+    protected function registerCommands()
+    {
+        $this->commands = [
+            'make:controller' => 'createController',
+            'make:model'      => 'createModel',
+            'make:middleware' => 'createMiddleware',
+            'make:rule'       => 'createValidationRule',
+            'make:migration'  => 'createMigration',
+            'app:setup'       => 'setupApplication',
+            'cache:clear'     => 'clearCache',
+            'migrate'         => 'runMigrations',
+            'migrate:rollback'=> 'rollbackMigrations',
+            'migrate:reset'   => 'resetMigrations',
+            'migrate:status'  => 'statusMigrations',
+            'help'            => 'showHelp',
+        ];
+    }
+
+    public function run(array $argv)
+    {
+        if (count($argv) < 2) {
+            $this->showHelp();
+            return;
+        }
+
+        $command = $argv[1];
+        $args    = array_slice($argv, 2);
+
+        if (!isset($this->commands[$command])) {
+            echo Colors::red("Unknown command: {$command}") . PHP_EOL;
+            $this->showHelp();
+            return;
+        }
+
+        $method = $this->commands[$command];
+        $this->$method($args);
+    }
+
+    // -------------------------------------------------------------------------
+    // Migration commands
+    // -------------------------------------------------------------------------
+
+    protected function createMigration(array $args)
+    {
+        if (empty($args[0])) {
+            echo Colors::red("Error: Migration name is required") . PHP_EOL;
+            echo "Usage: php bin/framework make:migration create_users_table" . PHP_EOL;
+            return;
+        }
+
+        $name      = strtolower(trim($args[0]));
+        $timestamp = date('Y_m_d_His');
+        $fileName  = "{$timestamp}_{$name}";
+        $className = \PHPFramework\Migrator::filenameToClassName($fileName);
+
+        $migrationsDir = getcwd() . '/database/migrations';
+        $this->ensureDirectoryExists($migrationsDir);
+
+        $path = "{$migrationsDir}/{$fileName}.php";
+
+        if (file_exists($path)) {
+            echo Colors::yellow("Migration already exists: {$path}") . PHP_EOL;
+            return;
+        }
+
+        $template = <<<PHP
+<?php
+
+use PHPFramework\Migration;
+
+class {$className} extends Migration
+{
+    public function up(): void
+    {
+        \$this->execute("
+            CREATE TABLE example (
+                id   INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+    }
+
+    public function down(): void
+    {
+        \$this->execute("DROP TABLE IF EXISTS example");
+    }
+}
+PHP;
+
+        file_put_contents($path, $template);
+        echo Colors::green("✓ Migration created: database/migrations/{$fileName}.php") . PHP_EOL;
+        echo Colors::cyan("  Class name: {$className}") . PHP_EOL;
+    }
+
+    protected function runMigrations(array $args)
+    {
+        $migrator = $this->getMigrator();
+        if (!$migrator) return;
+
+        echo Colors::blue("Running migrations...") . PHP_EOL;
+
+        $ran = $migrator->run();
+
+        if (empty($ran)) {
+            echo Colors::yellow("Nothing to migrate.") . PHP_EOL;
+            return;
+        }
+
+        foreach ($ran as $name) {
+            echo Colors::green("✓ Migrated: ") . $name . PHP_EOL;
+        }
+
+        echo PHP_EOL . Colors::green("Done. " . count($ran) . " migration(s) applied.") . PHP_EOL;
+    }
+
+    protected function rollbackMigrations(array $args)
+    {
+        $migrator = $this->getMigrator();
+        if (!$migrator) return;
+
+        echo Colors::blue("Rolling back last batch...") . PHP_EOL;
+
+        $rolled = $migrator->rollback();
+
+        if (empty($rolled)) {
+            echo Colors::yellow("Nothing to rollback.") . PHP_EOL;
+            return;
+        }
+
+        foreach ($rolled as $name) {
+            echo Colors::yellow("↩ Rolled back: ") . $name . PHP_EOL;
+        }
+
+        echo PHP_EOL . Colors::green("Done. " . count($rolled) . " migration(s) rolled back.") . PHP_EOL;
+    }
+
+    protected function resetMigrations(array $args)
+    {
+        $migrator = $this->getMigrator();
+        if (!$migrator) return;
+
+        echo Colors::blue("Resetting all migrations...") . PHP_EOL;
+
+        $rolled = $migrator->reset();
+
+        if (empty($rolled)) {
+            echo Colors::yellow("Nothing to reset.") . PHP_EOL;
+            return;
+        }
+
+        foreach ($rolled as $name) {
+            echo Colors::yellow("↩ Rolled back: ") . $name . PHP_EOL;
+        }
+
+        echo PHP_EOL . Colors::green("Done. " . count($rolled) . " migration(s) reset.") . PHP_EOL;
+    }
+
+    protected function statusMigrations(array $args)
+    {
+        $migrator = $this->getMigrator();
+        if (!$migrator) return;
+
+        $statuses = $migrator->status();
+
+        if (empty($statuses)) {
+            echo Colors::yellow("No migration files found.") . PHP_EOL;
+            return;
+        }
+
+        // Шапка таблицы
+        $colMigration = 55;
+        $colStatus    = 10;
+        $colBatch     = 6;
+
+        $line = str_repeat('-', $colMigration + $colStatus + $colBatch + 7);
+        echo $line . PHP_EOL;
+        printf(
+            "| %-{$colMigration}s | %-{$colStatus}s | %-{$colBatch}s |" . PHP_EOL,
+            'Migration', 'Status', 'Batch'
+        );
+        echo $line . PHP_EOL;
+
+        foreach ($statuses as $item) {
+            $status = $item['ran']
+                ? Colors::green(str_pad('✓ Ran', $colStatus))
+                : Colors::yellow(str_pad('Pending', $colStatus));
+            $batch  = $item['batch'] !== null ? (string)$item['batch'] : Colors::gray('-');
+
+            printf(
+                "| %-{$colMigration}s | %s | %-{$colBatch}s |" . PHP_EOL,
+                $item['migration'],
+                $status,
+                $batch
+            );
+        }
+        echo $line . PHP_EOL;
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers
+    // -------------------------------------------------------------------------
+
+    /**
+     * Создать экземпляр Migrator с PDO из конфига приложения
+     */
+    protected function getMigrator(): ?\PHPFramework\Migrator
+    {
+        $dbConfigPath = getcwd() . '/config/db.php';
+
+        if (!file_exists($dbConfigPath)) {
+            echo Colors::red("Error: Database config not found at config/db.php") . PHP_EOL;
+            return null;
+        }
+
+        require_once $dbConfigPath;
+
+        if (!defined('DB')) {
+            echo Colors::red("Error: DB constant is not defined in config/db.php") . PHP_EOL;
+            return null;
+        }
+
+        try {
+            $dsn = sprintf(
+                'mysql:host=%s;dbname=%s;charset=%s',
+                DB['host'],
+                DB['dbname'],
+                DB['charset'] ?? 'utf8mb4'
+            );
+
+            $pdo = new \PDO($dsn, DB['username'], DB['password'], DB['options'] ?? [
+                \PDO::ATTR_ERRMODE            => \PDO::ERRMODE_EXCEPTION,
+                \PDO::ATTR_DEFAULT_FETCH_MODE => \PDO::FETCH_ASSOC,
+            ]);
+        } catch (\PDOException $e) {
+            echo Colors::red("Database connection failed: " . $e->getMessage()) . PHP_EOL;
+            return null;
+        }
+
+        $migrationsPath = getcwd() . '/database/migrations';
+
+        return new \PHPFramework\Migrator($pdo, $migrationsPath);
+    }
+
+    // -------------------------------------------------------------------------
+    // Existing commands (unchanged)
+    // -------------------------------------------------------------------------
+
+    protected function createController(array $args)
+    {
+        if (empty($args[0])) {
+            echo Colors::red("Error: Controller name is required") . PHP_EOL;
+            echo "Usage: php bin/framework make:controller UserController" . PHP_EOL;
+            return;
+        }
+
+        $name = $args[0];
+        if (!str_ends_with($name, 'Controller')) {
+            $name .= 'Controller';
+        }
+
+        $path = getcwd() . '/app/Controllers/' . $name . '.php';
+
+        if (file_exists($path)) {
+            echo Colors::yellow("Controller already exists: {$path}") . PHP_EOL;
+            return;
+        }
+
+        $template = <<<PHP
+<?php
+
+namespace App\Controllers;
+
+class {$name} extends BaseController
+{
+    public function index(): mixed
+    {
+        return \$this->render('index');
+    }
+}
+PHP;
+
+        $this->ensureDirectoryExists(dirname($path));
+        file_put_contents($path, $template);
+        echo Colors::green("✓ Controller created: {$path}") . PHP_EOL;
+    }
+
+    protected function createModel(array $args)
+    {
+        if (empty($args[0])) {
+            echo Colors::red("Error: Model name is required") . PHP_EOL;
+            echo "Usage: php bin/framework make:model User" . PHP_EOL;
+            return;
+        }
+
+        $name      = $args[0];
+        $path      = getcwd() . '/app/Models/' . $name . '.php';
+
+        if (file_exists($path)) {
+            echo Colors::yellow("Model already exists: {$path}") . PHP_EOL;
+            return;
+        }
+
+        $tableName = strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $name)) . 's';
+
+        $template = <<<PHP
+<?php
+
+namespace App\Models;
+
+use PHPFramework\Model;
+
+class {$name} extends Model
+{
+    protected array \$fillable = [];
+
+    protected function tableName(): string
+    {
+        return '{$tableName}';
+    }
+
+    protected function primaryKeyName(): string
+    {
+        return 'id';
+    }
+}
+PHP;
+
+        $this->ensureDirectoryExists(dirname($path));
+        file_put_contents($path, $template);
+        echo Colors::green("✓ Model created: {$path}") . PHP_EOL;
+        echo Colors::cyan("  Table name: {$tableName}") . PHP_EOL;
+    }
+
+    protected function createMiddleware(array $args)
+    {
+        if (empty($args[0])) {
+            echo Colors::red("Error: Middleware name is required") . PHP_EOL;
+            echo "Usage: php bin/framework make:middleware AdminMiddleware" . PHP_EOL;
+            return;
+        }
+
+        $name = $args[0];
+        if (!str_ends_with($name, 'Middleware')) {
+            $name .= 'Middleware';
+        }
+
+        $path = getcwd() . '/app/Middlewares/' . $name . '.php';
+
+        if (file_exists($path)) {
+            echo Colors::yellow("Middleware already exists: {$path}") . PHP_EOL;
+            return;
+        }
+
+        $template = <<<PHP
+<?php
+
+namespace App\Middlewares;
+
+use PHPFramework\Interfaces\MiddlewareInterface;
+use PHPFramework\Request;
+use PHPFramework\Response;
+
+class {$name} implements MiddlewareInterface
+{
+    public function handle(Request \$request, Response \$response, callable \$next): mixed
+    {
+        return \$next();
+    }
+}
+PHP;
+
+        $this->ensureDirectoryExists(dirname($path));
+        file_put_contents($path, $template);
+        echo Colors::green("✓ Middleware created: {$path}") . PHP_EOL;
+    }
+
+    protected function createValidationRule(array $args)
+    {
+        if (empty($args[0])) {
+            echo Colors::red("Error: Rule name is required") . PHP_EOL;
+            echo "Usage: php bin/framework make:rule PhoneRule" . PHP_EOL;
+            return;
+        }
+
+        $name = $args[0];
+        if (!str_ends_with($name, 'Rule')) {
+            $name .= 'Rule';
+        }
+
+        $path     = getcwd() . '/app/Validation/Rules/' . $name . '.php';
+        $ruleName = strtolower(preg_replace('/Rule$/', '', $name));
+
+        if (file_exists($path)) {
+            echo Colors::yellow("Rule already exists: {$path}") . PHP_EOL;
+            return;
+        }
+
+        $template = <<<PHP
+<?php
+
+namespace App\Validation\Rules;
+
+use PHPFramework\Validation\ValidationRule;
+
+class {$name} extends ValidationRule
+{
+    protected string \$message = "The :fieldname: is invalid";
+
+    public static function key(): ?string
+    {
+        return '{$ruleName}';
+    }
+
+    public function passes(): bool
+    {
+        return true;
+    }
+}
+PHP;
+
+        $this->ensureDirectoryExists(dirname($path));
+        file_put_contents($path, $template);
+        echo Colors::green("✓ Validation rule created: {$path}") . PHP_EOL;
+        echo Colors::cyan("  Rule key: {$ruleName}") . PHP_EOL;
+    }
+
+    protected function setupApplication(array $args)
+    {
+        echo Colors::blue("Setting up application structure...") . PHP_EOL;
+
+        $directories = [
+            'app/Controllers',
+            'app/Models',
+            'app/Views/layouts',
+            'app/Views/includes',
+            'app/Middlewares',
+            'app/Validation/Rules',
+            'app/Services',
+            'config',
+            'database/migrations',
+            'public/assets/css',
+            'public/assets/js',
+            'public/assets/images',
+            'tmp/cache',
+            'uploads',
+            'tests',
+        ];
+
+        foreach ($directories as $dir) {
+            $path = getcwd() . '/' . $dir;
+            if (!is_dir($path)) {
+                mkdir($path, 0755, true);
+                echo Colors::green("✓ Created: {$dir}") . PHP_EOL;
+            }
+        }
+
+        $gitkeepDirs = ['tmp/cache', 'uploads', 'database/migrations'];
+        foreach ($gitkeepDirs as $dir) {
+            $gitkeepPath = getcwd() . '/' . $dir . '/.gitkeep';
+            if (!file_exists($gitkeepPath)) {
+                touch($gitkeepPath);
+            }
+        }
+
+        echo PHP_EOL . Colors::green("✓ Application structure created successfully!") . PHP_EOL;
+        echo Colors::cyan("Next steps:") . PHP_EOL;
+        echo "  1. Configure your .env file" . PHP_EOL;
+        echo "  2. Set up your web server to point to /public directory" . PHP_EOL;
+        echo "  3. Start building your application!" . PHP_EOL;
+    }
+
+    protected function clearCache(array $args)
+    {
+        $cachePath = getcwd() . '/tmp/cache';
+
+        if (!is_dir($cachePath)) {
+            echo Colors::yellow("Cache directory not found") . PHP_EOL;
+            return;
+        }
+
+        $files = glob($cachePath . '/*');
+        $count = 0;
+
+        foreach ($files as $file) {
+            if (is_file($file) && basename($file) !== '.gitkeep') {
+                unlink($file);
+                $count++;
+            }
+        }
+
+        echo Colors::green("✓ Cache cleared: {$count} file(s) deleted") . PHP_EOL;
+    }
+
+    protected function showHelp()
+    {
+        echo Colors::blue("PHP Framework CLI Tool") . PHP_EOL;
+        echo Colors::cyan("Version 1.1.0") . PHP_EOL . PHP_EOL;
+
+        echo Colors::green("Available commands:") . PHP_EOL . PHP_EOL;
+
+        echo Colors::cyan("  Generators:") . PHP_EOL;
+        echo "  make:controller <name>   " . Colors::yellow("Create a new controller") . PHP_EOL;
+        echo "  make:model <name>        " . Colors::yellow("Create a new model") . PHP_EOL;
+        echo "  make:middleware <name>   " . Colors::yellow("Create a new middleware") . PHP_EOL;
+        echo "  make:rule <name>         " . Colors::yellow("Create a new validation rule") . PHP_EOL;
+        echo "  make:migration <name>    " . Colors::yellow("Create a new migration file") . PHP_EOL;
+
+        echo PHP_EOL . Colors::cyan("  Migrations:") . PHP_EOL;
+        echo "  migrate                  " . Colors::yellow("Run all pending migrations") . PHP_EOL;
+        echo "  migrate:rollback         " . Colors::yellow("Rollback the last batch of migrations") . PHP_EOL;
+        echo "  migrate:reset            " . Colors::yellow("Rollback ALL migrations") . PHP_EOL;
+        echo "  migrate:status           " . Colors::yellow("Show the status of each migration") . PHP_EOL;
+
+        echo PHP_EOL . Colors::cyan("  Application:") . PHP_EOL;
+        echo "  app:setup                " . Colors::yellow("Setup application structure") . PHP_EOL;
+        echo "  cache:clear              " . Colors::yellow("Clear application cache") . PHP_EOL;
+        echo "  help                     " . Colors::yellow("Show this help message") . PHP_EOL;
+
+        echo PHP_EOL . Colors::green("Examples:") . PHP_EOL;
+        echo "  php bin/framework make:migration create_users_table" . PHP_EOL;
+        echo "  php bin/framework migrate" . PHP_EOL;
+        echo "  php bin/framework migrate:status" . PHP_EOL;
+        echo "  php bin/framework migrate:rollback" . PHP_EOL;
+    }
+
+    protected function ensureDirectoryExists(string $path)
+    {
+        if (!is_dir($path)) {
+            mkdir($path, 0755, true);
+        }
+    }
+}
+
+$cli = new FrameworkCLI();
+$cli->run($argv);
